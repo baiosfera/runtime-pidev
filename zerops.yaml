@@ -4,11 +4,15 @@ zerops:
       base: ubuntu/nodejs@26
       prepareCommands:
         - sudo apt-get update && sudo apt-get install -y --no-install-recommends git curl ca-certificates tar gzip build-essential
-        - npm install -g --ignore-scripts @earendil-works/pi-coding-agent gentle-pi
       buildCommands:
-        - gentle-shell setup || true
+        - mkdir -p ./cli ./bin
+        - npm install --prefix ./cli --no-save --ignore-scripts @earendil-works/pi-coding-agent gentle-pi
+        - curl -fsSL https://github.com/Gentleman-Programming/gentle-ai/releases/download/v4.4.0/gentle-ai_4.4.0_linux_amd64.tar.gz -o /tmp/gentle-ai.tar.gz && tar -xzf /tmp/gentle-ai.tar.gz -C ./bin && chmod +x ./bin/gentle-ai && rm -f /tmp/gentle-ai.tar.gz
+        - mkdir -p ./cli/node_modules/gentle-pi/.gentle-ai/v4.4.0 && cp ./bin/gentle-ai ./cli/node_modules/gentle-pi/.gentle-ai/v4.4.0/gentle-ai
       deployFiles:
         - .
+      cache:
+        - cli/node_modules
     run:
       base: ubuntu/nodejs@26
       volume:
@@ -19,14 +23,13 @@ zerops:
         - port: 3000
           httpSupport: true
       initCommands:
-        - sudo mkdir -p /mnt/localstorage/pidev /var/www/webdev && sudo chown -R zerops:zerops /mnt/localstorage/pidev /var/www/webdev
-        - sudo npm install -g --ignore-scripts @earendil-works/pi-coding-agent gentle-pi || true
-        - sudo mkdir -p /home/zerops/.local/lib/node_modules/gentle-pi/.gentle-ai/v4.4.0 && sudo cp -f /mnt/localstorage/bin/gentle-ai /home/zerops/.local/lib/node_modules/gentle-pi/.gentle-ai/v4.4.0/gentle-ai && sudo chmod +x /home/zerops/.local/lib/node_modules/gentle-pi/.gentle-ai/v4.4.0/gentle-ai || true
-        - sudo chown -R zerops:zerops /home/zerops
+        - sudo mkdir -p /mnt/localstorage/pidev/pi /mnt/localstorage/pidev/gentle-shell /var/www/webdev /home/zerops/.local/bin && sudo chown -R zerops:zerops /mnt/localstorage/pidev /var/www/webdev /home/zerops
+        - for b in /var/www/cli/node_modules/.bin/pi /var/www/cli/node_modules/.bin/gentle-shell /var/www/bin/gentle-ai; do [ -e "$b" ] && sudo ln -sfn "$b" "/usr/local/bin/$(basename "$b")" && ln -sfn "$b" "/home/zerops/.local/bin/$(basename "$b")"; done
       envVariables:
         PORT: "3000"
         HOST: "0.0.0.0"
         NODE_ENV: "production"
+        PATH: "/var/www/cli/node_modules/.bin:/var/www/bin:/mnt/localstorage/bin:/home/zerops/.local/bin:/usr/local/bin:/usr/bin:/bin"
         NATS_URL: ${nats_connectionString}
         PI_READ_ONLY: "false"
         PI_OBSERVATIONAL_ONLY: "false"
@@ -34,6 +37,9 @@ zerops:
         GENTLE_SHELL_HOME: "/mnt/localstorage/pidev/gentle-shell"
         PI_CODING_AGENT_DIR: "/mnt/localstorage/pidev/pi"
         OPENAI_BASE_URL: "http://bifrost:8080/v1"
-        OPENAI_API_KEY: ${PI_OPENAI_API_KEY}
-        DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
-      start: node server.mjs
+        OPENAI_API_KEY: "vk-pidev"
+      start: sh -c 'node /var/www/seed-config.mjs && exec node /var/www/server.mjs'
+      healthCheck:
+        httpGet:
+          port: 3000
+          path: /health

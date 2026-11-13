@@ -70,7 +70,8 @@ const server = http.createServer((req, res) => {
         if (!env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = 'http://bifrost:8080/v1';
         if (!env.OPENAI_API_KEY) env.OPENAI_API_KEY = 'vk-pidev';
 
-        const command = rawCommand || (prompt ? (prompt.startsWith('pi ') || prompt.startsWith('gentle-shell ') ? prompt : `pi --approve --provider bifrost --model bifrost/deepseek-chat -p '${prompt.replace(/'/g, "'\\''")}' < /dev/null`) : '');
+        const model = String(payload.model || 'auto').replace(/[^a-zA-Z0-9_./:-]/g, '') || 'auto';
+        const command = rawCommand || (prompt ? (prompt.startsWith('pi ') || prompt.startsWith('gentle-shell ') ? prompt : `pi --no-session --provider bifrost --model ${model} -p '${prompt.replace(/'/g, "'\\''")}' < /dev/null`) : '');
 
         exec(command, { cwd, env, timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
           if (err && !stdout) {
