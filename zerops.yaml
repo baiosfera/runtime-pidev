@@ -29,7 +29,6 @@ zerops:
         PORT: "3000"
         HOST: "0.0.0.0"
         NODE_ENV: "production"
-        PATH: "/var/www/cli/node_modules/.bin:/var/www/bin:/mnt/localstorage/bin:/home/zerops/.local/bin:/usr/local/bin:/usr/bin:/bin"
         NATS_URL: ${nats_connectionString}
         PI_READ_ONLY: "false"
         PI_OBSERVATIONAL_ONLY: "false"
