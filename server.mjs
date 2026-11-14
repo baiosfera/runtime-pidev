@@ -1,38 +1,107 @@
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { exec, spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = '0.0.0.0';
 const TTYD_PORT = parseInt(process.env.TTYD_INTERNAL_PORT || '7681', 10);
 
-function cleanEnvValue(val) {
+export function cleanEnvValue(val) {
   const s = String(val || '').trim();
   return !s || s.startsWith('${') ? '' : s;
+}
+
+export function resolveExecuteToken(env = process.env) {
+  return cleanEnvValue(env.PIDEV_EXECUTE_TOKEN) || cleanEnvValue(env.PIDEV_API_KEY);
+}
+
+export function isAuthorizedExecute(req, env = process.env) {
+  const expected = resolveExecuteToken(env);
+  if (!expected) {
+    return { ok: false, status: 403, message: 'Execute endpoint disabled: PIDEV_EXECUTE_TOKEN not configured' };
+  }
+  const authHeader = String(req.headers['authorization'] || '').trim();
+  const bearer = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+  const xToken = String(req.headers['x-pidev-token'] || '').trim();
+  const provided = bearer || xToken;
+  if (!provided) {
+    return { ok: false, status: 401, message: 'Missing Authorization Bearer token or X-Pidev-Token header' };
+  }
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, status: 401, message: 'Invalid execute token' };
+  }
+  return { ok: true, status: 200 };
+}
+
+export function resolveAllowedOrigin(originHeader, env = process.env) {
+  const origin = String(originHeader || '').trim();
+  if (!origin) return '';
+  const configured = cleanEnvValue(env.PIDEV_ALLOWED_ORIGINS || env.CORS_ORIGINS)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (configured.includes(origin)) return origin;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+      return origin;
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+export function resolveWorkspaceCwd(env = process.env) {
+  const configured = cleanEnvValue(env.PIDEV_WORKSPACES_DIR);
+  if (configured && fs.existsSync(configured)) return configured;
+  if (fs.existsSync('/mnt/localstorage/pidev/workspaces')) return '/mnt/localstorage/pidev/workspaces';
+  return '/var/www';
+}
+
+export function buildTerminalSpawnArgs(ttydPort, user, password, hasTmux = true) {
+  const base = ['-i', '127.0.0.1', '-p', String(ttydPort), '-W', '-b', '/terminal', '-c', `${user}:${password}`];
+  const piCmd = 'pi --provider bifrost --model auto';
+  if (hasTmux) {
+    return [...base, 'tmux', 'new-session', '-A', '-s', 'pidev', piCmd];
+  }
+  return [...base, 'sh', '-lc', piCmd];
 }
 
 const TTYD_USER = cleanEnvValue(process.env.TTYD_USER);
 const TTYD_PASSWORD = cleanEnvValue(process.env.TTYD_PASSWORD);
 let ttydProc = null;
 
+function hasBinary(name, fallbackPath) {
+  if (fallbackPath && fs.existsSync(fallbackPath)) return true;
+  const dirs = String(process.env.PATH || '').split(':').filter(Boolean);
+  return dirs.some((d) => fs.existsSync(`${d}/${name}`));
+}
+
 function startTtydSupervisor() {
   if (!TTYD_USER || !TTYD_PASSWORD) {
     console.log('[pidev] TTYD_USER/TTYD_PASSWORD not set; /terminal web shell disabled for security.');
     return;
   }
-  const cwd = fs.existsSync('/var/www/webdev') ? '/var/www/webdev' : '/var/www';
+  const cwd = resolveWorkspaceCwd();
   const launch = () => {
     const bin = fs.existsSync('/usr/local/bin/ttyd') ? '/usr/local/bin/ttyd' : '/var/www/bin/ttyd';
     if (!fs.existsSync(bin)) {
       console.warn(`[pidev] ttyd binary not found at ${bin}; /terminal unavailable.`);
       return;
     }
-    ttydProc = spawn(
-      bin,
-      ['-i', '127.0.0.1', '-p', String(TTYD_PORT), '-W', '-b', '/terminal', '-c', `${TTYD_USER}:${TTYD_PASSWORD}`, 'bash', '-l'],
-      { cwd, env: { ...process.env, TERM: 'xterm-256color' }, stdio: 'ignore' }
-    );
+    const tmuxOk = hasBinary('tmux', '/usr/bin/tmux');
+    const args = buildTerminalSpawnArgs(TTYD_PORT, TTYD_USER, TTYD_PASSWORD, tmuxOk);
+    ttydProc = spawn(bin, args, {
+      cwd,
+      env: { ...process.env, TERM: 'xterm-256color' },
+      stdio: 'ignore',
+    });
     ttydProc.on('exit', (code) => {
       ttydProc = null;
       console.warn(`[pidev] ttyd exited (${code}); restarting in 2s...`);
@@ -71,156 +140,175 @@ function proxyTerminalHttp(req, res) {
   req.pipe(proxyReq);
 }
 
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+export function createPidevServer(envOverride = process.env) {
+  return http.createServer((req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-  if (isTerminalPath(url.pathname)) {
-    proxyTerminalHttp(req, res);
-    return;
-  }
+    if (isTerminalPath(url.pathname)) {
+      proxyTerminalHttp(req, res);
+      return;
+    }
 
-  if (req.method === 'GET' && url.pathname === '/' && String(req.headers.accept || '').includes('text/html') && TTYD_USER && TTYD_PASSWORD) {
-    res.writeHead(302, { Location: '/terminal/' });
-    res.end();
-    return;
-  }
+    const ttydUser = cleanEnvValue(envOverride.TTYD_USER);
+    const ttydPass = cleanEnvValue(envOverride.TTYD_PASSWORD);
+    if (req.method === 'GET' && url.pathname === '/' && String(req.headers.accept || '').includes('text/html') && ttydUser && ttydPass) {
+      res.writeHead(302, { Location: '/terminal/' });
+      res.end();
+      return;
+    }
 
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Content-Type', 'application/json');
+    const allowedOrigin = resolveAllowedOrigin(req.headers.origin, envOverride);
+    if (allowedOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Pidev-Token');
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(allowedOrigin ? 204 : 403);
+      res.end();
+      return;
+    }
 
-  if (req.method === 'HEAD' && (url.pathname === '/execute' || url.pathname === '/health' || url.pathname === '/healthz' || url.pathname === '/')) {
-    res.writeHead(200);
-    res.end();
-    return;
-  }
+    if (req.method === 'HEAD' && (url.pathname === '/execute' || url.pathname === '/health' || url.pathname === '/healthz' || url.pathname === '/')) {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
 
-  if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/healthz' || url.pathname === '/')) {
-    res.writeHead(200);
-    res.end(JSON.stringify({
-      status: 'ok',
-      service: 'pidev',
-      node_version: process.version,
-      agent: 'gentle-pi',
-      terminal_enabled: Boolean(TTYD_USER && TTYD_PASSWORD),
-      terminal_path: '/terminal/',
-      cwd: process.cwd()
-    }));
-    return;
-  }
-
-  if (req.method === 'GET' && url.pathname === '/status') {
-    exec('gentle-shell --version', (err, stdout) => {
+    if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/healthz' || url.pathname === '/')) {
       res.writeHead(200);
       res.end(JSON.stringify({
         status: 'ok',
         service: 'pidev',
-        version: (stdout || '').trim(),
-        uptime: process.uptime(),
-        memory: process.memoryUsage()
+        node_version: process.version,
+        agent: 'gentle-pi',
+        terminal_enabled: Boolean(ttydUser && ttydPass),
+        terminal_path: '/terminal/',
+        execute_auth_enabled: Boolean(resolveExecuteToken(envOverride)),
+        workspace_dir: resolveWorkspaceCwd(envOverride),
       }));
-    });
-    return;
-  }
+      return;
+    }
 
-  if (req.method === 'POST' && url.pathname === '/execute') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-        const ctx = payload.context && typeof payload.context === 'object' ? payload.context : {};
-        const rawCommand = payload.command;
-        const prompt = payload.prompt || ctx.prompt || ctx.task || ctx.issueTitle || ctx.wakeReason || '';
-        const cwd = payload.cwd || process.cwd();
+    if (req.method === 'GET' && url.pathname === '/status') {
+      exec('gentle-shell --version', (err, stdout) => {
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          status: 'ok',
+          service: 'pidev',
+          version: (stdout || '').trim(),
+          uptime: process.uptime(),
+          memory: process.memoryUsage(),
+        }));
+      });
+      return;
+    }
 
-        if (!rawCommand && !prompt) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ status: 'error', message: 'Missing "command" or "prompt" parameter' }));
-          return;
-        }
+    if (req.method === 'POST' && url.pathname === '/execute') {
+      const auth = isAuthorizedExecute(req, envOverride);
+      if (!auth.ok) {
+        res.writeHead(auth.status);
+        res.end(JSON.stringify({ status: 'error', message: auth.message }));
+        return;
+      }
 
-        const env = {
-          ...process.env,
-          CI: 'true',
-          NON_INTERACTIVE: 'true',
-          GENTLE_SHELL_NO_AUTO_SETUP: '1',
-          PATH: `/mnt/localstorage/bin:/home/zerops/.local/bin:/usr/local/bin:${process.env.PATH || ''}`
-        };
-        if (!env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = 'http://bifrost:8080/v1';
-        if (!env.OPENAI_API_KEY) env.OPENAI_API_KEY = 'vk-pidev';
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const ctx = payload.context && typeof payload.context === 'object' ? payload.context : {};
+          const rawCommand = payload.command;
+          const prompt = payload.prompt || ctx.prompt || ctx.task || ctx.issueTitle || ctx.wakeReason || '';
+          const cwd = payload.cwd || resolveWorkspaceCwd(envOverride);
 
-        const model = String(payload.model || 'auto').replace(/[^a-zA-Z0-9_./:-]/g, '') || 'auto';
-        const command = rawCommand || (prompt ? (prompt.startsWith('pi ') || prompt.startsWith('gentle-shell ') ? prompt : `pi --no-session --provider bifrost --model ${model} -p '${String(prompt).replace(/'/g, "'\\''")}' < /dev/null`) : '');
-
-        exec(command, { cwd, env, timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
-          if (err && !stdout) {
-            res.writeHead(500);
-            res.end(JSON.stringify({
-              status: 'error',
-              message: err.message,
-              stdout: (stdout || '').trim(),
-              stderr: (stderr || '').trim()
-            }));
+          if (!rawCommand && !prompt) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ status: 'error', message: 'Missing "command" or "prompt" parameter' }));
             return;
           }
-          res.writeHead(200);
-          res.end(JSON.stringify({
-            status: 'ok',
-            output: (stdout || '').trim(),
-            stderr: (stderr || '').trim(),
-            exitCode: err ? err.code : 0
-          }));
-        });
-      } catch (parseErr) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ status: 'error', message: 'Invalid JSON payload' }));
-      }
-    });
-    return;
-  }
 
-  res.writeHead(404);
-  res.end(JSON.stringify({ status: 'error', message: 'Not found' }));
-});
+          const env = {
+            ...process.env,
+            CI: 'true',
+            NON_INTERACTIVE: 'true',
+            GENTLE_SHELL_NO_AUTO_SETUP: '1',
+            PATH: `/mnt/localstorage/bin:/home/zerops/.local/bin:/usr/local/bin:${process.env.PATH || ''}`,
+          };
+          if (!env.OPENAI_BASE_URL) env.OPENAI_BASE_URL = 'http://bifrost:8080/v1';
+          if (!env.OPENAI_API_KEY) env.OPENAI_API_KEY = 'vk-pidev';
 
-server.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  if (!isTerminalPath(url.pathname)) {
-    socket.destroy();
-    return;
-  }
-  const upstream = net.connect(TTYD_PORT, '127.0.0.1', () => {
-    socket.setTimeout(0);
-    upstream.setTimeout(0);
-    const headerLines = [];
-    for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      const k = req.rawHeaders[i];
-      const v = req.rawHeaders[i + 1];
-      if (k.toLowerCase() === 'host') {
-        headerLines.push(`Host: 127.0.0.1:${TTYD_PORT}`);
-      } else {
-        headerLines.push(`${k}: ${v}`);
-      }
+          const model = String(payload.model || 'auto').replace(/[^a-zA-Z0-9_./:-]/g, '') || 'auto';
+          const command = rawCommand || (prompt ? (prompt.startsWith('pi ') || prompt.startsWith('gentle-shell ') ? prompt : `pi --no-session --provider bifrost --model ${model} -p '${String(prompt).replace(/'/g, "'\\''")}' < /dev/null`) : '');
+
+          exec(command, { cwd, env, timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+            if (err && !stdout) {
+              res.writeHead(500);
+              res.end(JSON.stringify({
+                status: 'error',
+                message: err.message,
+                stdout: (stdout || '').trim(),
+                stderr: (stderr || '').trim(),
+              }));
+              return;
+            }
+            res.writeHead(200);
+            res.end(JSON.stringify({
+              status: 'ok',
+              output: (stdout || '').trim(),
+              stderr: (stderr || '').trim(),
+              exitCode: err ? err.code : 0,
+            }));
+          });
+        } catch {
+          res.writeHead(400);
+          res.end(JSON.stringify({ status: 'error', message: 'Invalid JSON payload' }));
+        }
+      });
+      return;
     }
-    upstream.write(`${req.method} ${req.url} HTTP/1.1\r\n${headerLines.join('\r\n')}\r\n\r\n`);
-    if (head && head.length) upstream.write(head);
-    socket.pipe(upstream);
-    upstream.pipe(socket);
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ status: 'error', message: 'Not found' }));
   });
-  upstream.on('error', () => socket.destroy());
-  socket.on('error', () => upstream.destroy());
-});
+}
 
-startTtydSupervisor();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const server = createPidevServer(process.env);
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    if (!isTerminalPath(url.pathname)) {
+      socket.destroy();
+      return;
+    }
+    const upstream = net.connect(TTYD_PORT, '127.0.0.1', () => {
+      socket.setTimeout(0);
+      upstream.setTimeout(0);
+      const headerLines = [];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        const k = req.rawHeaders[i];
+        const v = req.rawHeaders[i + 1];
+        if (k.toLowerCase() === 'host') {
+          headerLines.push(`Host: 127.0.0.1:${TTYD_PORT}`);
+        } else {
+          headerLines.push(`${k}: ${v}`);
+        }
+      }
+      upstream.write(`${req.method} ${req.url} HTTP/1.1\r\n${headerLines.join('\r\n')}\r\n\r\n`);
+      if (head && head.length) upstream.write(head);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    });
+    upstream.on('error', () => socket.destroy());
+    socket.on('error', () => upstream.destroy());
+  });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[pidev] Gentle-Pi HTTP Runner listening on ${HOST}:${PORT} (terminal=${Boolean(TTYD_USER && TTYD_PASSWORD)})`);
-});
+  startTtydSupervisor();
+
+  server.listen(PORT, HOST, () => {
+    console.log(`[pidev] Gentle-Pi HTTP Runner listening on ${HOST}:${PORT} (terminal=${Boolean(TTYD_USER && TTYD_PASSWORD)})`);
+  });
+}

@@ -16,6 +16,8 @@ zerops:
         - cli/node_modules
     run:
       base: ubuntu/nodejs@26
+      prepareCommands:
+        - sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       volume:
         hostname: localstorage
         mountPath: /mnt/localstorage
@@ -24,7 +26,7 @@ zerops:
         - port: 3000
           httpSupport: true
       initCommands:
-        - sudo mkdir -p /mnt/localstorage/pidev/pi /mnt/localstorage/pidev/gentle-shell /var/www/webdev /home/zerops/.local/bin && sudo chown -R zerops:zerops /mnt/localstorage/pidev /var/www/webdev /home/zerops
+        - sudo mkdir -p /mnt/localstorage/pidev/pi /mnt/localstorage/pidev/gentle-shell /mnt/localstorage/pidev/workspaces /home/zerops/.local/bin && sudo chown -R zerops:zerops /mnt/localstorage/pidev /home/zerops
         - for b in /var/www/cli/node_modules/.bin/pi /var/www/cli/node_modules/.bin/gentle-shell /var/www/bin/gentle-ai /var/www/bin/ttyd; do [ -e "$b" ] && sudo ln -sfn "$b" "/usr/local/bin/$(basename "$b")" && ln -sfn "$b" "/home/zerops/.local/bin/$(basename "$b")"; done
       envVariables:
         PORT: "3000"
@@ -36,9 +38,10 @@ zerops:
         GENTLE_SHELL_NO_AUTO_SETUP: "1"
         GENTLE_SHELL_HOME: "/mnt/localstorage/pidev/gentle-shell"
         PI_CODING_AGENT_DIR: "/mnt/localstorage/pidev/pi"
+        PIDEV_WORKSPACES_DIR: "/mnt/localstorage/pidev/workspaces"
         OPENAI_BASE_URL: "http://bifrost:8080/v1"
         OPENAI_API_KEY: "vk-pidev"
-        # TTYD_USER / TTYD_PASSWORD are inherited directly from Project Shared Vault
+        # TTYD_USER / TTYD_PASSWORD / PIDEV_EXECUTE_TOKEN are inherited from Project Shared Vault
       start: sh -c 'node /var/www/seed-config.mjs && exec node /var/www/server.mjs'
       healthCheck:
         httpGet:
