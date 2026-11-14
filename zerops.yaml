@@ -38,8 +38,7 @@ zerops:
         PI_CODING_AGENT_DIR: "/mnt/localstorage/pidev/pi"
         OPENAI_BASE_URL: "http://bifrost:8080/v1"
         OPENAI_API_KEY: "vk-pidev"
-        TTYD_USER: ${TTYD_USER}
-        TTYD_PASSWORD: ${TTYD_PASSWORD}
+        # TTYD_USER / TTYD_PASSWORD are inherited directly from Project Shared Vault
       start: sh -c 'node /var/www/seed-config.mjs && exec node /var/www/server.mjs'
       healthCheck:
         httpGet:
