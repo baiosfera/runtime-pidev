@@ -8,6 +8,7 @@ zerops:
         - mkdir -p ./cli ./bin
         - npm install --prefix ./cli --no-save --ignore-scripts @earendil-works/pi-coding-agent gentle-pi
         - curl -fsSL https://github.com/Gentleman-Programming/gentle-ai/releases/download/v4.4.0/gentle-ai_4.4.0_linux_amd64.tar.gz -o /tmp/gentle-ai.tar.gz && tar -xzf /tmp/gentle-ai.tar.gz -C ./bin && chmod +x ./bin/gentle-ai && rm -f /tmp/gentle-ai.tar.gz
+        - curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 -o ./bin/ttyd && chmod +x ./bin/ttyd
         - mkdir -p ./cli/node_modules/gentle-pi/.gentle-ai/v4.4.0 && cp ./bin/gentle-ai ./cli/node_modules/gentle-pi/.gentle-ai/v4.4.0/gentle-ai
       deployFiles:
         - .
@@ -24,7 +25,7 @@ zerops:
           httpSupport: true
       initCommands:
         - sudo mkdir -p /mnt/localstorage/pidev/pi /mnt/localstorage/pidev/gentle-shell /var/www/webdev /home/zerops/.local/bin && sudo chown -R zerops:zerops /mnt/localstorage/pidev /var/www/webdev /home/zerops
-        - for b in /var/www/cli/node_modules/.bin/pi /var/www/cli/node_modules/.bin/gentle-shell /var/www/bin/gentle-ai; do [ -e "$b" ] && sudo ln -sfn "$b" "/usr/local/bin/$(basename "$b")" && ln -sfn "$b" "/home/zerops/.local/bin/$(basename "$b")"; done
+        - for b in /var/www/cli/node_modules/.bin/pi /var/www/cli/node_modules/.bin/gentle-shell /var/www/bin/gentle-ai /var/www/bin/ttyd; do [ -e "$b" ] && sudo ln -sfn "$b" "/usr/local/bin/$(basename "$b")" && ln -sfn "$b" "/home/zerops/.local/bin/$(basename "$b")"; done
       envVariables:
         PORT: "3000"
         HOST: "0.0.0.0"
@@ -37,6 +38,8 @@ zerops:
         PI_CODING_AGENT_DIR: "/mnt/localstorage/pidev/pi"
         OPENAI_BASE_URL: "http://bifrost:8080/v1"
         OPENAI_API_KEY: "vk-pidev"
+        TTYD_USER: ${TTYD_USER}
+        TTYD_PASSWORD: ${TTYD_PASSWORD}
       start: sh -c 'node /var/www/seed-config.mjs && exec node /var/www/server.mjs'
       healthCheck:
         httpGet:
